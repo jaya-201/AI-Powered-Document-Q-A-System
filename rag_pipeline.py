@@ -40,7 +40,7 @@ def load_or_rebuild_vector_db(pdf_path, embeddings, path="vector_db"):
 
 # Step 4: Load Hugging Face LLM (Flan-T5, small)
 def load_llm():
-    pipe = pipeline("text2text-generation", model="google/flan-t5-base", device=-1)
+    pipe = pipeline("text2text-generation", model="google/flan-t5-small", device=-1)
     return HuggingFacePipeline(pipeline=pipe)
 
 
