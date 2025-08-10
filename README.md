@@ -26,7 +26,7 @@ How It Works
 Installation
 1. Clone this repository 
    bash:
-   git clone https://github.com/your-username/pdf-rag-app.git
+   git clone https://github.com/jaya-201/AI-Powered-Document-Q-A-System
    cd pdf-rag-app
 2. Create a virtual environment (recommended)
    bash:
