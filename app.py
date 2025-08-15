@@ -17,14 +17,14 @@ if uploaded_file is not None:
         f.write(uploaded_file.read())
 
     st.write("Processing PDF...")
-    chunks = load_pdf_chunks("uploaded.pdf")
-    embed_chunks(chunks)
+    chunks = load_pdf_chunks("uploaded.pdf") #load and split pdf
+    embed_chunks(chunks) #create embeddings
     st.session_state.db_created = True
     st.success("Document indexed and ready!")
 
 if st.session_state.db_created:
-    db = load_or_rebuild_vector_db("uploaded.pdf", embeddings)
-    qa_chain = build_qa_chain(db)
+    db = load_or_rebuild_vector_db("uploaded.pdf", embeddings) #load embeddings
+    qa_chain = build_qa_chain(db) #llm + retriever
 
     query = st.text_input("Ask a question about the document:")
     if query:
