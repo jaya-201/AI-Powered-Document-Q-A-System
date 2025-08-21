@@ -1,5 +1,5 @@
 import streamlit as st
-from rag_modified import setup_pipeline, query_with_vectorstore
+from rag_pipeline import setup_pipeline, query_with_vectorstore
 
 st.title("AI-Powered Document Q&A")
 
