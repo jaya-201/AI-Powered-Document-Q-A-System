@@ -1,14 +1,11 @@
 import streamlit as st
-import os
-from rag_pipeline import load_pdf_chunks, embed_chunks, load_or_rebuild_vector_db, build_qa_chain
-from langchain_community.embeddings import HuggingFaceEmbeddings
-
-embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+from rag_modified import setup_pipeline, query_with_vectorstore
 
 st.title("AI-Powered Document Q&A")
 
-if "db_created" not in st.session_state:
-    st.session_state.db_created = False
+# Store vectorstore in session_state
+if "vectorstore" not in st.session_state:
+    st.session_state.vectorstore = None
 
 uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
 
@@ -17,25 +14,13 @@ if uploaded_file is not None:
         f.write(uploaded_file.read())
 
     st.write("Processing PDF...")
-    chunks = load_pdf_chunks("uploaded.pdf") #load and split pdf
-    embed_chunks(chunks) #create embeddings
-    st.session_state.db_created = True
+    st.session_state.vectorstore = setup_pipeline("uploaded.pdf")
     st.success("Document indexed and ready!")
 
-if st.session_state.db_created:
-    db = load_or_rebuild_vector_db("uploaded.pdf", embeddings) #load embeddings
-    qa_chain = build_qa_chain(db) #llm + retriever
-
+if st.session_state.vectorstore is not None:
     query = st.text_input("Ask a question about the document:")
     if query:
-        result = qa_chain({"query": query})
-        if not result.get("source_documents") or len(result["source_documents"]) == 0:
-            st.warning("No result found, ask question related to the PDF.")
-        else:
-            st.subheader("Answer:")
-            st.write(result["result"])
+        result = query_with_vectorstore(st.session_state.vectorstore, query, k=3)
 
-        with st.expander("Source Chunks"):
-            for i, doc in enumerate(result["source_documents"]):
-                st.markdown(f"**Chunk {i+1}:**")
-                st.write(doc.page_content)
+        st.subheader("Answer:")
+        st.write(result)
