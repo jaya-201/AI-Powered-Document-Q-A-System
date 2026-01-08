@@ -12,6 +12,8 @@ function App() {
   const [uploading, setUploading] = useState(false);
   const [kValue, setKValue] = useState(3);
   const [message, setMessage] = useState('');
+  const [sessionId] = useState(() => 'session_' + Date.now()); // Generate unique session ID
+  const [chatHistory, setChatHistory] = useState([]); // Store chat messages
 
   // Fetch documents on load
   useEffect(() => {
@@ -59,17 +61,31 @@ function App() {
     if (!question.trim()) return;
 
     setLoading(true);
-    setAnswer('');
+    
+    // Add user question to chat history
+    const userMessage = { type: 'question', text: question };
+    setChatHistory(prev => [...prev, userMessage]);
 
     try {
       const response = await axios.post(`${API_URL}/query`, {
         question: question,
         k: kValue,
+        session_id: sessionId,
       });
       
-      setAnswer(response.data.answer);
+      const botAnswer = response.data.answer;
+      setAnswer(botAnswer);
+      
+      // Add bot answer to chat history
+      const botMessage = { type: 'answer', text: botAnswer };
+      setChatHistory(prev => [...prev, botMessage]);
+      
+      // Clear question input
+      setQuestion('');
     } catch (error) {
-      setAnswer(`Error: ${error.response?.data?.detail || error.message}`);
+      const errorMsg = `Error: ${error.response?.data?.detail || error.message}`;
+      setAnswer(errorMsg);
+      setChatHistory(prev => [...prev, { type: 'error', text: errorMsg }]);
     } finally {
       setLoading(false);
     }
@@ -82,6 +98,7 @@ function App() {
       await axios.delete(`${API_URL}/documents`);
       setDocuments([]);
       setAnswer('');
+      setChatHistory([]);
       setMessage('All documents cleared successfully');
     } catch (error) {
       setMessage(`Error: ${error.response?.data?.detail || error.message}`);
@@ -184,12 +201,25 @@ function App() {
                   </button>
                 </form>
 
-                {answer && (
-                  <div className="answer-section">
-                    <h3>📝 Answer:</h3>
-                    <div className="answer-box">
-                      {answer}
+                {chatHistory.length > 0 && (
+                  <div className="chat-history">
+                    <h3>💬 Conversation:</h3>
+                    <div className="chat-messages">
+                      {chatHistory.map((msg, index) => (
+                        <div key={index} className={`message ${msg.type}`}>
+                          {msg.type === 'question' && <strong>You:</strong>}
+                          {msg.type === 'answer' && <strong>Assistant:</strong>}
+                          {msg.type === 'error' && <strong>Error:</strong>}
+                          <p>{msg.text}</p>
+                        </div>
+                      ))}
                     </div>
+                  </div>
+                )}
+
+                {loading && (
+                  <div className="loading-indicator">
+                    <p>🔍 Thinking...</p>
                   </div>
                 )}
               </>

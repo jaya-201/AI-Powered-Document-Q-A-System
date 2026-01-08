@@ -9,23 +9,27 @@ from contextlib import asynccontextmanager
 from rag_pipeline import (
     setup_pipeline,
     query_with_vectorstore,
+    query_with_chat_history,
     load_vectorstore,
     save_vectorstore,
     add_documents_to_vectorstore,
     get_file_hash,
     is_document_processed,
     save_document_metadata,
-    load_document_metadata
+    load_document_metadata,
+    merge_documents
 )
 
-# Global vectorstore
+# Global vectorstore and documents
 vectorstore = None
+documents = None  # For BM25 retrieval
+chat_sessions = {}  # Store conversation history by session_id
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load vectorstore on startup"""
-    global vectorstore
-    vectorstore = load_vectorstore()
+    global vectorstore, documents
+    vectorstore, documents = load_vectorstore()
     if vectorstore:
         print("✅ Loaded existing vectorstore")
     else:
@@ -47,6 +51,7 @@ app.add_middleware(
 class QueryRequest(BaseModel):
     question: str
     k: int = 3
+    session_id: Optional[str] = None  # For chat history tracking
 
 class QueryResponse(BaseModel):
     answer: str
@@ -78,7 +83,7 @@ async def get_status():
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
     """Upload and process a PDF document"""
-    global vectorstore
+    global vectorstore, documents
     
     if not file.filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
@@ -108,15 +113,17 @@ async def upload_document(file: UploadFile = File(...)):
     try:
         if vectorstore is None:
             # Create new vectorstore
-            vectorstore = setup_pipeline(file_path)
+            vectorstore, new_docs = setup_pipeline(file_path)
+            documents = new_docs
             message = f"Created knowledge base with '{file.filename}'"
         else:
             # Add to existing vectorstore
-            vectorstore = add_documents_to_vectorstore(vectorstore, file_path)
+            vectorstore, new_docs = add_documents_to_vectorstore(vectorstore, file_path)
+            documents = merge_documents(documents, new_docs)
             message = f"Added '{file.filename}' to knowledge base"
         
         # Save vectorstore and metadata
-        save_vectorstore(vectorstore)
+        save_vectorstore(vectorstore, documents)
         save_document_metadata(file.filename, file_hash)
         
         return {
@@ -130,8 +137,8 @@ async def upload_document(file: UploadFile = File(...)):
 
 @app.post("/query", response_model=QueryResponse)
 async def query_documents(request: QueryRequest):
-    """Query the vectorstore with a question"""
-    global vectorstore
+    """Query the vectorstore with hybrid retrieval and chat history"""
+    global vectorstore, documents, chat_sessions
     
     if vectorstore is None:
         raise HTTPException(status_code=400, detail="No documents uploaded yet")
@@ -140,7 +147,32 @@ async def query_documents(request: QueryRequest):
         raise HTTPException(status_code=400, detail="Question cannot be empty")
     
     try:
-        answer = query_with_vectorstore(vectorstore, request.question, k=request.k)
+        # Get or create session history
+        session_id = request.session_id or "default"
+        if session_id not in chat_sessions:
+            chat_sessions[session_id] = []
+        
+        chat_history = chat_sessions[session_id]
+        
+        # Query with chat history
+        answer = query_with_chat_history(
+            vectorstore=vectorstore,
+            question=request.question,
+            chat_history=chat_history,
+            documents=documents,
+            k=request.k
+        )
+        
+        # Update chat history
+        chat_sessions[session_id].append({
+            "question": request.question,
+            "answer": answer
+        })
+        
+        # Keep only last 10 exchanges to avoid token limits
+        if len(chat_sessions[session_id]) > 10:
+            chat_sessions[session_id] = chat_sessions[session_id][-10:]
+        
         return QueryResponse(answer=answer, question=request.question)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
@@ -154,13 +186,14 @@ async def list_documents():
 @app.delete("/documents")
 async def clear_all_documents():
     """Clear all documents and reset vectorstore"""
-    global vectorstore
+    global vectorstore, documents
     
     try:
         if Path("vector_db").exists():
             shutil.rmtree("vector_db")
         
         vectorstore = None
+        documents = None
         
         return {
             "message": "All documents cleared successfully",
