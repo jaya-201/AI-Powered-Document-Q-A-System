@@ -14,9 +14,24 @@ import hashlib
 from dotenv import load_dotenv
 from typing import List
 from langchain_core.documents import Document
+import numpy as np
 
 # Load environment variables
 load_dotenv()
+
+# Cross-encoder will be loaded lazily when first needed
+_cross_encoder = None
+
+def get_cross_encoder():
+    """Lazy load cross-encoder to avoid startup delays"""
+    global _cross_encoder
+    if _cross_encoder is None:
+        print("Loading cross-encoder model for reranking...")
+        # Import here to avoid heavy dependencies at module load
+        from sentence_transformers import CrossEncoder
+        _cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+        print("Cross-encoder loaded successfully")
+    return _cross_encoder
 
 # PDF_PATH= "GradCAM why did you say that.pdf"
 
@@ -162,12 +177,59 @@ def hybrid_retrieve(dense_retriever, sparse_retriever, query: str, k: int = 3) -
     
     return merged_docs
 
-# Gemini API setup
-llm = ChatGoogleGenerativeAI(
-    model=os.getenv("MODEL_NAME", "gemini-1.5-flash-latest"),
-    temperature=0.3,  # Slightly higher for more natural responses
-    google_api_key=os.getenv("GOOGLE_API_KEY")
-)
+def rerank_documents(documents: List[Document], query: str, top_k: int = 3):
+    """
+    Rerank documents using cross-encoder for better relevance scoring.
+    
+    Cross-encoders compute relevance scores by jointly encoding query and document,
+    which is more accurate than bi-encoder similarity but slower.
+    Use this as a second-stage reranker after initial hybrid retrieval.
+    
+    Args:
+        documents: List of retrieved documents to rerank
+        query: User query
+        top_k: Number of top documents to return after reranking
+    
+    Returns:
+        Reranked list of top_k documents
+    """
+    if not documents:
+        return []
+    
+    # Get cross-encoder (loads on first call)
+    cross_encoder = get_cross_encoder()
+    
+    # Prepare query-document pairs for cross-encoder
+    pairs = [[query, doc.page_content] for doc in documents]
+    
+    # Get relevance scores from cross-encoder
+    scores = cross_encoder.predict(pairs)
+    
+    # Sort documents by scores (descending)
+    scored_docs = list(zip(documents, scores))
+    scored_docs.sort(key=lambda x: x[1], reverse=True)
+    
+    # Return top_k documents
+    reranked_docs = [doc for doc, score in scored_docs[:top_k]]
+    
+    print(f"Reranked {len(documents)} documents, returning top {top_k}")
+    print(f"Top scores: {[f'{score:.4f}' for _, score in scored_docs[:top_k]]}")
+    
+    return reranked_docs
+
+# Lazy load LLM to avoid startup delays
+_llm = None
+
+def get_llm():
+    """Lazy load Gemini LLM"""
+    global _llm
+    if _llm is None:
+        _llm = ChatGoogleGenerativeAI(
+            model=os.getenv("MODEL_NAME", "gemini-1.5-flash-latest"),
+            temperature=0.3,
+            google_api_key=os.getenv("GOOGLE_API_KEY")
+        )
+    return _llm
 
 prompt = ChatPromptTemplate.from_messages([
     ("system", "You are an intelligent document assistant. Your role is to answer questions based on the provided context.\n\n"
@@ -191,7 +253,11 @@ def format_docs(docs):
 #top level run with hybrid retrieval
 def query_with_vectorstore(vectorstore, question: str, documents=None, k: int = 3):
     """
-    Hybrid retrieval: Combines dense (FAISS semantic) + sparse (BM25 keyword) search
+    Multi-step retrieval with hybrid search + cross-encoder reranking:
+    1. Dense retrieval (FAISS semantic search)
+    2. Sparse retrieval (BM25 keyword search)
+    3. Hybrid merge (combine and deduplicate)
+    4. Cross-encoder reranking (score and reorder by relevance)
     """
     # Dense retriever (semantic search with FAISS)
     dense_retriever = vectorstore.as_retriever(
@@ -203,13 +269,16 @@ def query_with_vectorstore(vectorstore, question: str, documents=None, k: int = 
         }
     )
     
-    # If documents available, use hybrid retrieval
+    # If documents available, use hybrid retrieval + reranking
     if documents:
         sparse_retriever = BM25Retriever.from_documents(documents)
         sparse_retriever.k = k
         
-        # Get hybrid results using our custom function
-        retrieved_docs = hybrid_retrieve(dense_retriever, sparse_retriever, question, k)
+        # Step 1-3: Get hybrid results (retrieves more candidates for reranking)
+        hybrid_docs = hybrid_retrieve(dense_retriever, sparse_retriever, question, k * 2)
+        
+        # Step 4: Rerank using cross-encoder
+        retrieved_docs = rerank_documents(hybrid_docs, question, top_k=k)
         
         # Format and use in chain
         context = format_docs(retrieved_docs)
@@ -220,13 +289,15 @@ def query_with_vectorstore(vectorstore, question: str, documents=None, k: int = 
     
     # Create response using LLM
     formatted_prompt = prompt.format(context=context, question=question)
+    llm = get_llm()
     answer = llm.invoke(formatted_prompt)
     
     return answer.content
 
 def query_with_chat_history(vectorstore, question: str, chat_history: list, documents=None, k: int = 3):
     """
-    Query with conversation history for continuous chat
+    Query with conversation history for continuous chat.
+    Uses multi-step retrieval: hybrid search + cross-encoder reranking
     """
     # Dense retriever (semantic search with FAISS)
     dense_retriever = vectorstore.as_retriever(
@@ -238,13 +309,16 @@ def query_with_chat_history(vectorstore, question: str, chat_history: list, docu
         }
     )
     
-    # If documents available, use hybrid retrieval
+    # If documents available, use hybrid retrieval + reranking
     if documents:
         sparse_retriever = BM25Retriever.from_documents(documents)
         sparse_retriever.k = k
         
-        # Get hybrid results using our custom function
-        retrieved_docs = hybrid_retrieve(dense_retriever, sparse_retriever, question, k)
+        # Get hybrid results (retrieves more candidates for reranking)
+        hybrid_docs = hybrid_retrieve(dense_retriever, sparse_retriever, question, k * 2)
+        
+        # Rerank using cross-encoder
+        retrieved_docs = rerank_documents(hybrid_docs, question, top_k=k)
         
         # Format and use in chain
         context = format_docs(retrieved_docs)
@@ -280,6 +354,7 @@ def query_with_chat_history(vectorstore, question: str, chat_history: list, docu
         history=history_text,
         question=question
     )
+    llm = get_llm()
     answer = llm.invoke(formatted_prompt)
     
     return answer.content
